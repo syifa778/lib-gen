@@ -1,0 +1,20 @@
+---
+description: Follow APP.md and keep frontend/backend plus the local RAG stack aligned.
+alwaysApply: true
+---
+
+# Spec and stack
+
+- Product source of truth: `APP.md`. Implementation workflow: `AGENTS.md`. How to run/stop: `README.md`.
+- v1 modalities only: PDF ingest, k-related search, Project-scoped chat.
+- Frontend is a React SPA (Vite). Backend is FastAPI. The browser talks only to `/api`; FastAPI owns SQLite and `backend/data/uploads`. Qdrant and `llama.cpp` are **not wired yet** — retrieval is a keyword stub. Local Docker sidecars: `langfuse/` (UI :3000), `model-embedding/` (llama :8080, traced LiteLLM :4000), `model-text/` (llama :30000, traced LiteLLM :4001).
+- A Project is a saved document selection. Chat context is that selection, not implicit search results.
+- Search `k` stays user-configurable. Ground answers in retrieved chunks; if evidence is missing, say so.
+- Duplicate PDFs are rejected by **file bytes** (`409 duplicate_pdf` naming the existing filename), not by the upload name.
+- Backend is `127.0.0.1:8000`; Vite is `localhost:5173`. If a port is already bound, stop that listener (commands in `README.md`). Do not delete `backend/data/`.
+- When something changes, update the related markdown **in the same work**:
+  - `APP.md` — product behavior, API contracts, data/UX rules
+  - `README.md` — how to run, stop, or operate (ports, data dir, limits)
+  - `AGENTS.md` — agent workflow, contracts, local-run notes
+  - this file — if always-on stack or doc rules change
+- Do not expand v1 (other file types, auth, general chat) unless the spec changes.

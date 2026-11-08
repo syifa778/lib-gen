@@ -1,0 +1,16 @@
+model_list:
+  - model_name: qwen35-4b
+    litellm_params:
+      model: openai/Qwen3.5-4B-Q4_K_M.gguf
+      api_base: http://llama:8080/v1
+      api_key: dummy
+      drop_params: true
+  - model_name: Qwen3.5-4B-Q4_K_M.gguf
+    litellm_params:
+      model: openai/Qwen3.5-4B-Q4_K_M.gguf
+      api_base: http://llama:8080/v1
+      api_key: dummy
+      drop_params: true
+
+litellm_settings:
+  callbacks: ["langfuse_otel"]

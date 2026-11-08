@@ -1,0 +1,53 @@
+# Qwen3 embedding llama.cpp server + LiteLLM proxy (Langfuse traces).
+# Put Qwen3-Embedding-0.6B-Q8_0.gguf in this folder (next to this file).
+#
+# Direct llama.cpp:  http://127.0.0.1:8080  (no traces)
+# Traced OpenAI API: http://127.0.0.1:4000  (LiteLLM → llama → Langfuse)
+#
+# Start Langfuse first:  cd ../langfuse && docker compose up -d
+
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: libgen-embedding
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - .:/models:ro
+    command: >
+      -m /models/Qwen3-Embedding-0.6B-Q8_0.gguf
+      --host 0.0.0.0 --port 8080
+      --embeddings --pooling last
+      -c 8192 --parallel 2
+      -t 8 -tb 16
+      -b 512 -ub 512 --cont-batching
+      -ctk q8_0 -ctv q8_0
+    cpus: 8
+    restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: libgen-embedding-proxy
+    depends_on:
+      - llama
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - ./litellm.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LANGFUSE_PUBLIC_KEY: pk-lf-libgen-local
+      LANGFUSE_SECRET_KEY: sk-lf-libgen-local
+      LANGFUSE_HOST: http://langfuse-web:3000
+      LANGFUSE_BASE_URL: http://langfuse-web:3000
+      LANGFUSE_OTEL_HOST: http://langfuse-web:3000
+      LITELLM_DEFAULT_EMBEDDING_ENCODING_FORMAT: none
+    restart: unless-stopped
+    networks:
+      - default
+      - libgen
+
+networks:
+  libgen:
+    name: libgen
+    external: true

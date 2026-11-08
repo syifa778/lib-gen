@@ -1,0 +1,55 @@
+# Qwen3.5 4B llama.cpp server (CPU) + LiteLLM proxy (Langfuse traces).
+# Put Qwen3.5-4B-Q4_K_M.gguf in this folder (next to this file).
+#
+# Direct llama.cpp:  http://127.0.0.1:30000  (no traces)
+# Traced OpenAI API: http://127.0.0.1:4001  (LiteLLM → llama → Langfuse)
+#
+# Start Langfuse first:  cd ../langfuse && docker compose up -d
+#
+# This host has no NVIDIA GPU in Docker/WSL, so we use the CPU `server`
+# image (same as model-embedding). To use CUDA later: image
+# ghcr.io/ggml-org/llama.cpp:full-cuda, gpus: all, entrypoint
+# /app/llama-server, and add -ngl 99 (drop -t / raise -c if VRAM allows).
+
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: libgen-text
+    ports:
+      - "127.0.0.1:30000:8080"
+    volumes:
+      - .:/models:ro
+    command: >
+      -m /models/Qwen3.5-4B-Q4_K_M.gguf
+      --host 0.0.0.0
+      --port 8080
+      -c 8192
+      -n 1024
+      -t 8
+    restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: libgen-text-proxy
+    depends_on:
+      - llama
+    ports:
+      - "127.0.0.1:4001:4000"
+    volumes:
+      - ./litellm.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LANGFUSE_PUBLIC_KEY: pk-lf-libgen-local
+      LANGFUSE_SECRET_KEY: sk-lf-libgen-local
+      LANGFUSE_HOST: http://langfuse-web:3000
+      LANGFUSE_BASE_URL: http://langfuse-web:3000
+      LANGFUSE_OTEL_HOST: http://langfuse-web:3000
+    restart: unless-stopped
+    networks:
+      - default
+      - libgen
+
+networks:
+  libgen:
+    name: libgen
+    external: true

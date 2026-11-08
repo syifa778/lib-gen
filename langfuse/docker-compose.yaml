@@ -1,0 +1,214 @@
+# Local Langfuse v4 — six containers, one job: store LLM/embedding traces.
+#
+# You only use the UI: http://127.0.0.1:3000
+#   login  local@libgen.local / LibgenLocal1!
+#   keys   pk-lf-libgen-local / sk-lf-libgen-local
+#
+# The other five services are infrastructure. LiteLLM in model-embedding/
+# and model-text/ joins Docker network `libgen` and posts traces to
+# http://langfuse-web:3000
+#
+# What each box is for:
+#   langfuse-web     UI + public API (this is the only thing you browse)
+#   langfuse-worker  background jobs (ingest traces, clickhouse writes)
+#   postgres         users, orgs, projects, API keys (metadata)
+#   clickhouse       traces / observations / scores (analytics, lots of rows)
+#   redis            job queue + cache (BullMQ)
+#   minio            S3-compatible object store (raw event blobs + media)
+#                    MinIO is "local AWS S3". You do not log into it for
+#                    day-to-day tracing; Langfuse talks to it for you.
+
+services:
+  # ---------------------------------------------------------------------------
+  # Worker — consumes Redis queues, writes ClickHouse, reads/writes MinIO.
+  # No host port. You never call this from a browser.
+  # ---------------------------------------------------------------------------
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    restart: unless-stopped
+    depends_on: &langfuse-depends-on
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment: &langfuse-worker-env
+      # Browser-facing URL (cookies, OAuth callbacks). Keep as localhost.
+      NEXTAUTH_URL: http://localhost:3000
+      # Postgres connection (service name `postgres` on the compose network).
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      SALT: libgen-local-salt
+      # Must be 64 hex chars. Local-only; not a production secret.
+      ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      TELEMETRY_ENABLED: "false"
+      # ClickHouse: native protocol for migrations, HTTP for queries.
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      # --- MinIO as S3 (path-style, because there is no real DNS for buckets)
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: myredissecret
+    networks:
+      - default
+      - libgen
+
+  # ---------------------------------------------------------------------------
+  # Web — Next.js UI + API. HOSTNAME=0.0.0.0 is required on Docker Desktop
+  # or the process binds only the container IP and http://127.0.0.1:3000 fails.
+  # ---------------------------------------------------------------------------
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      <<: *langfuse-worker-env
+      HOSTNAME: "0.0.0.0"
+      NEXTAUTH_SECRET: libgen-local-nextauth-secret
+      # Browser uploads go to the host-mapped MinIO port; the server uses
+      # the internal hostname. Two URLs, same MinIO.
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
+      # Headless first-boot: org + project + user + API keys (do not quote).
+      LANGFUSE_INIT_ORG_ID: libgen
+      LANGFUSE_INIT_ORG_NAME: Lib Gen
+      LANGFUSE_INIT_PROJECT_ID: libgen
+      LANGFUSE_INIT_PROJECT_NAME: lib-gen
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-libgen-local
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-libgen-local
+      LANGFUSE_INIT_USER_EMAIL: local@libgen.local
+      LANGFUSE_INIT_USER_NAME: local
+      LANGFUSE_INIT_USER_PASSWORD: LibgenLocal1!
+    networks:
+      - default
+      - libgen
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/public/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+
+  # ---------------------------------------------------------------------------
+  # ClickHouse — column store for traces (high write volume).
+  # Host :8123 is HTTP debug only; Langfuse uses it over the compose network.
+  # ---------------------------------------------------------------------------
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - "127.0.0.1:8123:8123"
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # MinIO — S3-compatible object storage (local stand-in for AWS S3).
+  # S3 API:     http://127.0.0.1:9090  (inside Docker: http://minio:9000)
+  # Console UI: http://127.0.0.1:9091  user minio / miniosecret
+  # Bucket `langfuse` is created on first start (mkdir /data/langfuse).
+  # You do not need the console for tracing; it is only if you want to
+  # inspect uploaded blobs.
+  # ---------------------------------------------------------------------------
+  minio:
+    image: cgr.dev/chainguard/minio
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    ports:
+      - "127.0.0.1:9090:9000"
+      - "127.0.0.1:9091:9001"
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Redis — not a database for traces. Queue + cache only. No host port.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: docker.io/redis:7
+    restart: unless-stopped
+    command: >
+      --requirepass myredissecret
+      --maxmemory-policy noeviction
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a myredissecret ping | grep PONG"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Postgres — relational metadata (login, orgs, projects, API keys).
+  # Traces themselves are NOT stored here. No host port.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: docker.io/postgres:17
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:
+  langfuse_redis_data:
+
+networks:
+  # Shared with model-embedding / model-text LiteLLM so they can resolve
+  # hostname langfuse-web.
+  libgen:
+    name: libgen

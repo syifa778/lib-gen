@@ -1,0 +1,20 @@
+model_list:
+  - model_name: qwen3-embedding
+    litellm_params:
+      model: openai/Qwen3-Embedding-0.6B-Q8_0.gguf
+      api_base: http://llama:8080/v1
+      api_key: dummy
+      drop_params: true
+    model_info:
+      mode: embedding
+  - model_name: Qwen3-Embedding-0.6B-Q8_0.gguf
+    litellm_params:
+      model: openai/Qwen3-Embedding-0.6B-Q8_0.gguf
+      api_base: http://llama:8080/v1
+      api_key: dummy
+      drop_params: true
+    model_info:
+      mode: embedding
+
+litellm_settings:
+  callbacks: ["langfuse_otel"]

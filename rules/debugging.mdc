@@ -1,0 +1,33 @@
+---
+alwaysApply: true
+---
+# Debugging Lib Gen
+
+Reproduce first. Name the failing modality: **ingest**, **search**, or **chat**. Then isolate the layer: UI, API, PDF extract, embedding, vector retrieve, or LLM generate. Change only that layer until the failure is explained.
+
+## Classify
+
+- Upload never becomes `ready` → ingest (parse, chunk, embed, persist).
+- Search empty or irrelevant → query embed, collection contents, `k`, score/ids.
+- Chat ignores files or invents facts → Project `document_ids`, retrieval filter, prompt grounding.
+- Button does nothing / wrong screen → frontend only; confirm with a direct API call.
+
+## Reproduce without the UI
+
+Hit the backend with the same payload the UI should send (`upload`, `POST /search` with the user’s `k`, `POST /projects/{id}/chat`). If the API is correct, do not “fix” retrieval. If the API is wrong, do not restyle the SPA.
+
+## RAG checks (in order)
+
+1. Document status is `ready` and ids on the Project match the library.
+2. Query and chunks used the **same** embedding model.
+3. Chat retrieval is filtered to the Project selection (not the last search, not the whole library).
+4. Inspect retrieved chunks **before** blaming the LLM. Empty/wrong chunks → index/filter bug, not a prompt tweak.
+5. Do not change chunking, `k`, filters, and the system prompt in one patch.
+
+## Runtime
+
+Confirm frontend, FastAPI, and `backend/data/` (SQLite + uploads) are up. Later: Qdrant and `llama.cpp`. Missing `LIBGEN_DATA_DIR` / `QDRANT_URL` / `LLAMA_BASE_URL` is a config bug, not an algorithm bug. Log request id, document/project ids, `k`, and chunk count at each boundary.
+
+## After a fix
+
+Re-run the same upload → search (`k`) → Project → chat path. Check the other two modalities for regressions. Record the cause in the reply (layer + evidence), not only the patch.
